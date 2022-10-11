@@ -3,10 +3,7 @@
 (require typed/rackunit)
 
 ;TODO - JYSS3
-;Will need to implement the remaining functions
-;Will also need to check that multiple functions do not have the same name
-;Will need to implement other functions but have a check that main is in out list of fundefinitions
-;Will need to handle what happens with first 'main function call
+;Will also need to check that multiple functions do not have the same name in list of function definitions
 
 ;Arith language top-definitons
 (define-type ExprC (U numC binop leq0? idC FuncallC))
@@ -51,7 +48,7 @@
 (define (get-fundef [n : Symbol] [fds : (Listof FundefC)]) : FundefC
   (cond
     [(empty? fds)
-     (error 'get-fundef "reference to undefined function")]
+     (error 'JYSS "reference to undefined function")]
     [(cons? fds)
      (cond
        [(equal? n (FundefC-fname (first fds))) (first fds)]
@@ -62,20 +59,20 @@
 (check-exn (regexp (regexp-quote "reference to undefined function"))
            (lambda () (get-fundef 'C (list (FundefC 'A 'x (numC 5)) (FundefC 'B 'y (numC 6))))))
 
+;helper function for interpreting funcalls (eager property of interpreting args first)
+(define (interpret-funcalls [fname : Symbol] [paramV : ExprC] [lstfunc : (Listof FundefC)]) : Real
+  (define fn (get-fundef fname lstfunc))
+  (interp (subst (numC (interp paramV lstfunc)) (FundefC-param fn)  (FundefC-body fn)) lstfunc))
+
 ;evaluator/interpreter
-(define (interp [exp : ExprC] [lstfunc : (Listof FundefC)]) : Real
+(define (interp [exp : ExprC] [lstfuncd : (Listof FundefC)]) : Real
   (match exp
       [(numC n) n]
       [(idC s) (error 'JYSS "undefined variable error ~e" s)]
-      [(leq0? a b c) (if (<= (interp a lstfunc) 0) (interp b lstfunc) (interp c lstfunc))]
-      [(binop o l r) (arithmeticOperator o (interp l lstfunc) (interp r lstfunc))]
-      [(FuncallC f paramValue)(interpret-funcalls f paramValue lstfunc)]
+      [(leq0? a b c) (if (<= (interp a lstfuncd) 0) (interp b lstfuncd) (interp c lstfuncd))]
+      [(binop o l r) (arithmeticOperator o (interp l lstfuncd) (interp r lstfuncd))]
+      [(FuncallC f paramValue)(interpret-funcalls f paramValue lstfuncd)]
     ))
-
-;helper function for interpreting funcalls
-(define (interpret-funcalls [fname : Symbol] [paramV : ExprC] [lstfunc : (Listof FundefC)]) : Real
-  (define fn (get-fundef fname lstfunc))
-  (interp (subst paramV (FundefC-param fn)  (FundefC-body fn)) lstfunc))
 
 ;test-case
 (check-equal? (interp  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
@@ -83,55 +80,111 @@
 (check-equal? (interp (leq0? (numC 4) (numC 4) (numC 800)) '()) 800)
 (check-equal? (interp (leq0? (numC -1) (numC 7) (numC -1)) '()) 7)
 (check-equal? (interp (FuncallC 'f (numC 3)) (list (FundefC 'f 'x (binop '+ (idC 'x) (numC 1))))) 4)
+(check-exn (regexp (regexp-quote "division by 0"))
+           (lambda () (interp (binop '/ (numC 5) (numC 0)) '())))
 (check-exn (regexp (regexp-quote "undefined variable error"))
            (lambda () (interp (idC 'y) '())))
 
-;parse concrete JYSS syntax to expressions for interpreter
- (define (parse [s : Sexp]) : ExprC
-    (cond
-      [(symbol? s) (idC s)]
-      [(real? s) (numC s)]
-      [(list? s)
-       (case (first s)
-         [(+ * - /) (binop (first s) (parse (second s)) (parse (third s)))]
-         [(leq0?) (leq0? (parse (second s)) (parse (third s)) (parse (fourth s)))]
-         [else (match s
-                 [(list (? symbol? a) b) (FuncallC a (parse b))]
-                 [other (error 'JYSS "something went wrong")])
-               ])]
-      [else (error 'JYSS "invalid input")]))
+;Finds and interprets the function named main with a param of value 0 from the function definitions
+(define (interp-fns [lstfuncd : (Listof FundefC)]) : Real
 
-;test-case
-(check-equal? (parse '{+ {* 1 (/ 2 2)} {- (* 2 3) 3}})  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
-                                                               (binop '- (binop '* (numC 2) (numC 3)) (numC 3))))
-(check-equal? (parse '{leq0? 4 5 5}) (leq0? (numC 4) (numC 5) (numC 5)))
-(check-equal? (parse '{fn x}) (FuncallC 'fn (idC 'x)))
-
-;parsing concrete JYSS syntax to function definitions for interpreter
-(define (parse-fundef [s : Sexp]) : FundefC
-  (cond
-    [(list? s)
-     (case (first s)
-       [(fn) (match (second s)
-                 [(list (? symbol? a) (? symbol? b)) (FundefC a b (parse (third s)))])]
-       [() (error 'JYSS "where are the param and body?")]
-       [else (error 'JYSS "where is fn?")])]
-    [else (error 'JYSS "invalid fundef syntax")])
+  (match (get-fundef 'main lstfuncd)
+    [(FundefC 'main 'init exp) (interp (FuncallC 'main (numC 0)) lstfuncd)])
   )
 
 ;test-case
-(check-equal? (parse-fundef '(fn (addone x) (+ 4 1))) (FundefC 'addone 'x (binop '+ (numC 4) (numC 1))))
+(check-equal? (interp-fns (list (FundefC 'main 'init (binop '+ (numC 4) (numC 4))))) 8)
 
-;parsing JYSS syntax to a list of function definitions where at least one is main for interepreter
+;parse concrete JYSS syntax to expressions for interpreter to understand
+(define (parse [s : Sexp]) : ExprC
+    (match s
+      [(? symbol? s) (if (member s '(+ - * /)) (error 'JYSS "an operand cannot be any of above") (idC s))]
+      [(? real? s) (numC s)]
+      [(list (? symbol? a) b) (FuncallC a (parse b))]
+      [(? list? l)
+       (match l
+         [(list op b c) (case op
+                         [(+ - * /) (binop op (parse b) (parse c))]
+                         [else (error 'JYSS "symbol not found")])]
+         [(list 'leq0? b c d) (leq0? (parse b) (parse c) (parse d))]
+         [other (error 'JYSS "not a parsible expression")])
+               ]
+      ))
+
+;test-case
+(check-equal? (parse '{+ {* 1 {/ 2 2}} {- (* 2 3) 3}})  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
+                                                               (binop '- (binop '* (numC 2) (numC 3)) (numC 3))))
+(check-equal? (parse '{leq0? 4 5 5}) (leq0? (numC 4) (numC 5) (numC 5)))
+(check-equal? (parse '{fn x}) (FuncallC 'fn (idC 'x)))
+(check-exn (regexp (regexp-quote "not a parsible expression"))
+           (lambda () (parse '{/ 3 4 5})))
+(check-exn (regexp (regexp-quote "symbol not found"))
+           (lambda () (parse '{^ 3 4})))
+(check-exn (regexp (regexp-quote "an operand cannot be any of above"))
+           (lambda () (parse '(+ + 3))))
+
+;helper function to check if symbol is a valid id
+(define (valid-ID? [s : Symbol]) : Boolean
+  (if (member s '(+ - * /)) #f #t)
+  )
+
+;parsing concrete JYSS syntax to function definitions for interpreter
+(define (parse-fundef [s : Sexp]) : FundefC
+     (match s
+       [(list 'fn (list (? symbol? items) ...) c) (match (second s)
+                       [(list (? symbol? a) (? symbol? b))
+                        (if (and (valid-ID? a) (valid-ID? b))
+                            (FundefC a b (parse (third s)))
+                            (error 'JYSS "not valid ID"))])]
+       [other (error 'JYSS "invalid function definition syntax")])
+  )
+
+;test-case
+(check-equal? (parse-fundef '{fn {addone x} {+ 4 1}}) (FundefC 'addone 'x (binop '+ (numC 4) (numC 1))))
+(check-exn (regexp (regexp-quote "invalid function definition syntax"))
+           (lambda () (parse-fundef '(house))))
+(check-exn (regexp (regexp-quote "invalid function definition syntax"))
+           (lambda () (parse-fundef 6)))
+(check-exn (regexp (regexp-quote "not valid ID"))
+           (lambda () (parse-fundef '(fn (+ x) 13))))
+
+
+
+;helper function to create a list of fnames from all the function definitions we can use to check for dups
+(define (all-fnames [lst : (Listof FundefC)]) : (Listof Symbol)
+  (match lst
+    ['() '()]
+    [(cons f r) (cons (FundefC-fname f) (all-fnames r))])
+  )
+
+;test-case
+(check-equal? (all-fnames (list (FundefC 'f 'x (numC 4)) (FundefC 'z 'e (numC 4)))) '(f z))
+
+;parsing JYSS syntax to a list of function definitions 
 (define (parse-prog [s : Sexp]) : (Listof FundefC)
   (match s
     ['() '()]
-    [(cons fn r) (cond
-                 [(list? fn) (cons (parse-fundef fn) (parse-prog r))]
-                 [else (error 'JYSS "not a list form JYSS")])]
-    [other (error 'JYSS "no valid fundef found")]
+    [(cons f r) (cond
+                 [(list? f) (cons (parse-fundef f) (parse-prog r))]
+                 [else (error 'JYSS "no valid fundef found")])]
     ))
 
 ;test-case
-(check-equal? (parse-prog '{{fn {f x} {+ x 14}} {fn {main init} {+ x 14}}}) (list (FundefC 'f 'x (binop '+ (idC 'x) (numC 14)))
-                                                                                  (FundefC 'main 'init (binop '+ (idC 'x) (numC 14)))))
+(check-equal? (parse-prog '{{fn {f x} {+ x 14}} {fn {main init} {+ x 14}}})
+              (list (FundefC 'f 'x (binop '+ (idC 'x) (numC 14)))
+                    (FundefC 'main 'init (binop '+ (idC 'x) (numC 14)))))
+(check-exn (regexp (regexp-quote "no valid fundef found"))
+           (lambda () (parse-prog '{something})))
+
+;Combines parsing and interpretation be able to evaluate JYSS3
+(define (top-interp [s : Sexp]) : Real
+  (cond
+   [(equal? #f (check-duplicates (all-fnames (parse-prog s)))) (interp-fns (parse-prog s))]
+   [else (error 'JYSS "we have duplicate function definitions")]
+   ))
+
+;test-case
+(check-equal? (top-interp '{{fn {f x} {+ x 2}} {fn {g x} {+ x 2}} {fn {main init} {f {g 11}}}}) 15)
+(check-exn (regexp (regexp-quote "we have duplicate function definitions"))
+           (lambda () (top-interp '{{fn {f x} {+ x 2}} {fn {f x} {+ x 2}} {fn {f init} {f {g 11}}}})))
+
