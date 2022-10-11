@@ -15,7 +15,6 @@
 
 (struct FundefC ([fname : Symbol] [param : Symbol] [body : ExprC])#:transparent)
 
-
 ;function that maps binop symbol to arithetic operation
 (define (arithmeticOperator [s : Sexp] [l : Real] [r : Real]) : Real
   (match s
@@ -35,7 +34,8 @@
                [(symbol=? s for) what]
                [else in])]
     [(FuncallC f a) (FuncallC f (subst what for a))]
-    [(binop op l r) (binop op (subst what for l) (subst what for r))])
+    [(binop op l r) (binop op (subst what for l) (subst what for r))]
+    [(leq0? a b c) (leq0? (subst what for a) (subst what for b) (subst what for c))])
 )
 
 ;test-case
@@ -95,10 +95,15 @@
 ;test-case
 (check-equal? (interp-fns (list (FundefC 'main 'init (binop '+ (numC 4) (numC 4))))) 8)
 
+;helper function to check if symbol is a valid id
+(define (valid-ID? [s : Symbol]) : Boolean
+  (if (member s '(+ - * / leq0? fn)) #f #t)
+  )
+
 ;parse concrete JYSS syntax to expressions for interpreter to understand
 (define (parse [s : Sexp]) : ExprC
     (match s
-      [(? symbol? s) (if (member s '(+ - * /)) (error 'JYSS "an operand cannot be any of above") (idC s))]
+      [(? symbol? s) (if (valid-ID? s) (idC s) (error 'JYSS "cannot use a reserved symbol must use valid ID"))]
       [(? real? s) (numC s)]
       [(list (? symbol? a) b) (FuncallC a (parse b))]
       [(? list? l)
@@ -120,18 +125,13 @@
            (lambda () (parse '{/ 3 4 5})))
 (check-exn (regexp (regexp-quote "symbol not found"))
            (lambda () (parse '{^ 3 4})))
-(check-exn (regexp (regexp-quote "an operand cannot be any of above"))
+(check-exn (regexp (regexp-quote "cannot use a reserved symbol must use valid ID"))
            (lambda () (parse '(+ + 3))))
-
-;helper function to check if symbol is a valid id
-(define (valid-ID? [s : Symbol]) : Boolean
-  (if (member s '(+ - * /)) #f #t)
-  )
 
 ;parsing concrete JYSS syntax to function definitions for interpreter
 (define (parse-fundef [s : Sexp]) : FundefC
      (match s
-       [(list 'fn (list (? symbol? items) ...) c) (match (second s)
+       [(list 'fn (list fun-name arg-name) exp) (match (second s)
                        [(list (? symbol? a) (? symbol? b))
                         (if (and (valid-ID? a) (valid-ID? b))
                             (FundefC a b (parse (third s)))
@@ -185,6 +185,8 @@
 
 ;test-case
 (check-equal? (top-interp '{{fn {f x} {+ x 2}} {fn {g x} {+ x 2}} {fn {main init} {f {g 11}}}}) 15)
+(check-equal? (top-interp (quote ((fn (main init) (leq0? (* 3 1) 3 (+ 2 9)))))) 11)
 (check-exn (regexp (regexp-quote "we have duplicate function definitions"))
            (lambda () (top-interp '{{fn {f x} {+ x 2}} {fn {f x} {+ x 2}} {fn {f init} {f {g 11}}}})))
+
 
