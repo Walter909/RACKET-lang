@@ -2,9 +2,9 @@
 
 (require typed/rackunit)
 
-;TODO - JYSS3
-;Will also need to check that multiple functions do not have the same name in list of function definitions
+;I was able to make all my test-cases pass so Full project implemented
 
+;JYSS3
 ;Arith language top-definitons
 (define-type ExprC (U numC binop leq0? idC FuncallC))
 (struct numC ([n : Real])#:transparent)
