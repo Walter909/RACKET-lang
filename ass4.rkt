@@ -1,14 +1,8 @@
 #lang typed/racket
-
 (require typed/rackunit)
 
-;TODO
-;Will need new match case to create fundefinition for main
-;Will need to make sure funcalls all only on valid values
-;Will need new substitution method capabable of working on list of symbols and list of values for interp
-;Will need to update interpret-funcalls to work with a list of values(Listof ExprC) instead of just a single val paramV
-
 ;JYSS4
+;I got to implement all the features and test-cases 
 ;Arith language top-definitons
 (define-type ExprC (U numC binop leq0? idC FuncallC))
 (struct numC ([n : Real])#:transparent)
@@ -16,7 +10,6 @@
 (struct leq0? ([test : ExprC] [then : ExprC] [else : ExprC])#:transparent)
 (struct idC ([name : Symbol])#:transparent)
 (struct FuncallC ([fname : Symbol] [paramVals : (Listof ExprC)])#:transparent)
-
 (struct FundefC ([fname : Symbol] [params : (Listof Symbol)] [body : ExprC])#:transparent)
 
 ;function that maps binop symbol to arithetic operation
@@ -27,10 +20,9 @@
     ['- (- l r)]
     ['/ (cond
           [(not (zero? r)) (/ l r)]
-          [else (error 'JYSS "division by 0")])])
-  )
+          [else (error 'JYSS "division by 0")])]))
 
-;substition function for all expressions with a value
+;substitute one takes in what the value for a symbol in a function expressions with a value
 (define (subst-one [what : ExprC] [for : Symbol] [in : ExprC]) : ExprC
   (match in
     [(numC n) in]
@@ -40,8 +32,7 @@
     [(FuncallC f vals) (FuncallC f (map (lambda ([val : ExprC])
                                           (subst-one what for val)) vals))]
     [(binop op l r) (binop op (subst-one what for l) (subst-one what for r))]
-    [(leq0? a b c) (leq0? (subst-one what for a) (subst-one what for b) (subst-one what for c))])
-  )
+    [(leq0? a b c) (leq0? (subst-one what for a) (subst-one what for b) (subst-one what for c))]))
 
 ;test-case
 (check-equal? (subst-one (numC 3) 'x (binop '+ (idC 'x) (idC 'y))) (binop '+ (numC 3) (idC 'y)))
@@ -50,36 +41,9 @@
 (check-equal? (subst-one (numC 3) 'x (leq0? (idC 'x) (idC 'x) (idC 'x))) (leq0? (numC 3) (numC 3) (numC 3)))
 (check-equal? (subst-one (numC 3) 'x (numC 6)) (numC 6))
 
-;helper function to return the index of a symbol in a list of Symbols
-(define (index-of-symbol [s : Symbol][l : (Listof Symbol)]) : Real
-  (match l
-    ['() 0]
-    [(cons f r) (cond
-                  [(not (equal? f s)) (+ (index-of-symbol s r) 1)] 
-                  [else (index-of-symbol s '())])]
-    ))
-;test-case
-(check-equal? (index-of-symbol 'a '(b x d a)) 3)
-(check-equal? (index-of-symbol 'a '(b a d c)) 1)
-
-;helper function to return the value Expression at an index from a list of value Expressions
-(define (value-at-index [index : Real] [vals : (Listof ExprC)] [lst-size : Real]) : ExprC
-  (cond
-    [(equal? (- lst-size index) (length vals)) (first vals)]
-    [else (match vals
-            ['() (error 'JYSS "could not find val at that index")]
-            [(cons f r) (value-at-index index r lst-size)])]))
-
-;test-case
-(check-equal? (value-at-index 1 (list (numC 1) (numC 2) (numC 3)) 3) (numC 2))
-(check-equal? (value-at-index 2 (list (numC 1) (numC 2) (numC 3)) 3) (numC 3))
-(check-exn (regexp (regexp-quote "could not find val at that index"))
-           (lambda () (value-at-index 10 (list (numC 1) (numC 2) (numC 3)) 3)))
-
-;substitution method for Functions param values with multiple params
-;(for each arg we want to substitute in our expression)
+;substitution method for Functions param values with multiple params placeholders
 (define (subst-many [vals : (Listof ExprC)] [for : (Listof Symbol)] [in : ExprC]) : ExprC
-  (if (empty? vals) in (subst-many (rest vals) (rest for) (subst-one (first vals) (first for) in))
+  (if (or (empty? vals) (empty? for)) in (subst-many (rest vals) (rest for) (subst-one (first vals) (first for) in))
       ))
 
 (check-equal? (subst-many (list (numC 3) (numC 5)) (list 'x 'y)
@@ -111,11 +75,12 @@
 (define (interpret-funcalls [fname : Symbol] [paramVals : (Listof ExprC)] [lstfunc : (Listof FundefC)]) : Real
   (define fn (get-fundef fname lstfunc))
   (define all-params (FundefC-params fn))
-  (interp (subst-many (map (lambda ([paramV : ExprC])
-                             (numC (interp paramV lstfunc))) paramVals) all-params
-                                                                        (FundefC-body fn)) lstfunc))
+  (cond
+    [(not (equal? (length all-params) (length paramVals))) (error 'JYSS "different length of args and values")]
+    [else (interp (subst-many (map (lambda ([paramV : ExprC])
+                                     (numC (interp paramV lstfunc))) paramVals) all-params
+                                                                                (FundefC-body fn)) lstfunc)]))
     
-
 ;helper function to create listof of exprC from args
 (define (my-params [s : (Listof Any)]) : (Listof ExprC)
   (cast s (Listof ExprC)))
@@ -127,8 +92,7 @@
     [(idC s) (error 'JYSS "undefined variable error ~e" s)]
     [(leq0? a b c) (if (<= (interp a lstfuncd) 0) (interp b lstfuncd) (interp c lstfuncd))]
     [(binop o l r) (arithmeticOperator o (interp l lstfuncd) (interp r lstfuncd))]
-    [(FuncallC (? symbol? f) (list args ...)) (interpret-funcalls f (my-params args) lstfuncd)]
-    ))
+    [(FuncallC (? symbol? f) (list args ...)) (interpret-funcalls f (my-params args) lstfuncd)]))
 
 ;test-case
 (check-equal? (interp  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
@@ -144,18 +108,15 @@
 
 ;Finds and interprets the function body of main 
 (define (interp-fns [lstfuncd : (Listof FundefC)]) : Real
-
   (match (get-fundef 'main lstfuncd)
-    [(FundefC 'main (list) exp) (interp exp lstfuncd)])
-  )
+    [(FundefC 'main (list) exp) (interp exp lstfuncd)]))
 
 ;test-case
 (check-equal? (interp-fns (list (FundefC 'main (list) (binop '+ (numC 4) (numC 4))))) 8)
 
 ;helper function to check if symbol is a valid id
 (define (valid-ID? [s : Symbol]) : Boolean
-  (if (member s '(+ - * / leq0? fn)) #f #t)
-  )
+  (if (member s '(+ - * / leq0? fn)) #f #t))
 
 ;helper function to determine the type that an sexp should return and prevent some collisions
 (define (expected-type [s : Sexp]) : Symbol
@@ -166,8 +127,7 @@
      (cond
        [(equal? (first l) 'leq0?) 'leq0?]
        [(member (first l) '(+ - * /)) 'binop]
-       [else 'funcallC])])
-  )
+       [else 'funcallC])]))
 
 ;test-case
 (check-equal? (expected-type '(leq0? x y g)) 'leq0?)
@@ -193,7 +153,8 @@
               [(list op l r) (binop op (parse l) (parse r))]
               [other (error 'JYSS "invalid binop syntax ~e" s)])]
     ['leq0? (match s
-              [(list 'leq0? a b c) (leq0? (parse a) (parse b) (parse c))])]))
+              [(list 'leq0? a b c) (leq0? (parse a) (parse b) (parse c))]
+              [other (error 'JYSS "no matchhing clause for leq0?")])]))
 
 ;test-case
 (check-equal? (parse '{+ {* 1 {/ 2 2}} {- (* 2 3) 3}})  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
@@ -202,6 +163,8 @@
 (check-equal? (parse '{f x}) (FuncallC 'f (list (idC 'x))))
 (check-equal? (parse '{f x y}) (FuncallC 'f (list (idC 'x) (idC 'y))))
 (check-equal? (parse '{^ 3 4}) (FuncallC '^ (list (numC 3) (numC 4))))
+(check-exn (regexp (regexp-quote "no matchhing clause for leq0?"))
+           (lambda () (parse '(leq0? (x 4) 3 (+ 2 9) 3))))
 (check-exn (regexp (regexp-quote "invalid binop syntax"))
            (lambda () (parse '{/ 3 4 5})))
 (check-exn (regexp (regexp-quote "invalid function call syntax"))
@@ -217,8 +180,7 @@
                                                       (if (and (valid-ID? a) (map valid-ID? (cast b (Listof Symbol))))
                                                           (FundefC a (cast b (Listof Symbol)) (parse (third s)))
                                                           (error 'JYSS "not valid ID"))])]
-    [other (error 'JYSS "invalid function definition syntax ~e" s)])
-  )
+    [other (error 'JYSS "invalid function definition syntax ~e" s)]))
 
 ;test-case
 (check-equal? (parse-fundef '{fn {addone x} {+ 4 1}}) (FundefC 'addone (list 'x) (binop '+ (numC 4) (numC 1))))
@@ -235,8 +197,7 @@
 (define (all-fnames [lst : (Listof FundefC)]) : (Listof Symbol)
   (match lst
     ['() '()]
-    [(cons f r) (cons (FundefC-fname f) (all-fnames r))])
-  )
+    [(cons f r) (cons (FundefC-fname f) (all-fnames r))]))
 
 ;test-case
 (check-equal? (all-fnames (list (FundefC 'f (list 'x) (numC 4)) (FundefC 'z (list 'e) (numC 4)))) '(f z))
@@ -247,9 +208,7 @@
     ['() '()]
     [(cons f r) (cond
                   [(list? f) (cons (parse-fundef f) (parse-prog r))]
-                  [else (error 'JYSS "no valid fundef found")])]
-    )
-  )
+                  [else (error 'JYSS "no valid fundef found")])]))
 
 ;test-case
 (check-equal? (parse-prog '{{fn {f x} {+ x 14}} {fn {main} {f 14}}})
@@ -259,8 +218,8 @@
 ;special interp-fns test-cases
 (check-equal? (interp-fns (parse-prog '{{fn {f x y} {+ x y}}{fn {main} {f 1 2}}})) 3)
 (check-equal? (interp-fns (parse-prog '{{fn {f} 5} {fn {main} {+ {f} {f}}}})) 10)
-(check-exn #px"undefined variable error" (λ () (interp-fns (parse-prog '{{fn {f x y} {+ x y}}
-                                                                         {fn {main} {f 1}}}))))
+(check-exn #px"different length of args and values" (λ () (interp-fns (parse-prog '{{fn {f x y} {+ x y}}
+                                                                                    {fn {main} {f 1}}}))))
 (check-exn (regexp (regexp-quote "no valid fundef found"))
            (lambda () (parse-prog '{something})))
 
@@ -268,8 +227,7 @@
 (define (top-interp [s : Sexp]) : Real
   (cond
     [(equal? #f (check-duplicates (all-fnames (parse-prog s)))) (interp-fns (parse-prog s))]
-    [else (error 'JYSS "we have duplicate function definitions")]
-    ))
+    [else (error 'JYSS "we have duplicate function definitions")]))
 
 ;test-case
 (check-equal? (top-interp '{{fn {f x} {+ x 2}} {fn {g x} {+ x 2}} {fn {main} {f {g 11}}}}) 15)
