@@ -1,9 +1,10 @@
 #lang typed/racket
 (require typed/rackunit)
 
-;JYSS4
-;I got to implement all the features and test-cases 
-;Arith language top-definitons
+;JYSS5
+;Will need to make all the interp test-cases use a valid list of environments
+
+;language top-definitons
 (define-type ExprC (U numC binop leq0? idC FuncallC))
 (struct numC ([n : Real])#:transparent)
 (struct binop ([operator : Sexp] [l : ExprC] [r : ExprC])#:transparent)
@@ -11,6 +12,30 @@
 (struct idC ([name : Symbol])#:transparent)
 (struct FuncallC ([fname : Symbol] [paramVals : (Listof ExprC)])#:transparent)
 (struct FundefC ([fname : Symbol] [params : (Listof Symbol)] [body : ExprC])#:transparent)
+
+;value definitions for primitive types
+(define-type Value (U Real Boolean))
+;bindings definitions for environments
+(define-type Env (Listof Bind))
+(struct Bind ([name : Symbol] [val : Value])#:transparent)
+
+;top/default environment definitions
+(define top-level : Env (list (Bind 'true #t) (Bind 'false #f)))
+
+
+;serialize function that takes a value and returns a string format of it
+(define (serialize [x : Value]) : String
+  (match x
+      [(? real? r) (~v r)]
+      [(? boolean? s) (cond
+                        [(equal? s #t) "true"]
+                        [else "false"])])
+  )
+
+;test-case
+(check-equal? (serialize 3) "3")
+(check-equal? (serialize #t) "true")
+(check-equal? (serialize #f) "false")
 
 ;function that maps binop symbol to arithetic operation
 (define (arithmeticOperator [s : Sexp] [l : Real] [r : Real]) : Real
@@ -21,37 +46,6 @@
     ['/ (cond
           [(not (zero? r)) (/ l r)]
           [else (error 'JYSS "division by 0")])]))
-
-;substitute one takes in what the value for a symbol in a function expressions with a value
-(define (subst-one [what : ExprC] [for : Symbol] [in : ExprC]) : ExprC
-  (match in
-    [(numC n) in]
-    [(idC s) (cond
-               [(symbol=? s for) what]
-               [else in])]
-    [(FuncallC f vals) (FuncallC f (map (lambda ([val : ExprC])
-                                          (subst-one what for val)) vals))]
-    [(binop op l r) (binop op (subst-one what for l) (subst-one what for r))]
-    [(leq0? a b c) (leq0? (subst-one what for a) (subst-one what for b) (subst-one what for c))]))
-
-;test-case
-(check-equal? (subst-one (numC 3) 'x (binop '+ (idC 'x) (idC 'y))) (binop '+ (numC 3) (idC 'y)))
-(check-equal? (subst-one (numC 3) 'x (FuncallC 'f (list (idC 'x)))) (FuncallC 'f (list (numC 3))))
-(check-equal? (subst-one (numC 3) 'x (FuncallC 'f (list (idC 'y)))) (FuncallC 'f (list (idC 'y))))
-(check-equal? (subst-one (numC 3) 'x (leq0? (idC 'x) (idC 'x) (idC 'x))) (leq0? (numC 3) (numC 3) (numC 3)))
-(check-equal? (subst-one (numC 3) 'x (numC 6)) (numC 6))
-
-;substitution method for Functions param values with multiple params placeholders
-(define (subst-many [vals : (Listof ExprC)] [for : (Listof Symbol)] [in : ExprC]) : ExprC
-  (if (or (empty? vals) (empty? for)) in (subst-many (rest vals) (rest for) (subst-one (first vals) (first for) in))
-      ))
-
-(check-equal? (subst-many (list (numC 3) (numC 5)) (list 'x 'y)
-                          (binop '+ (idC 'x) (idC 'y))) (binop '+ (numC 3) (numC 5)))
-(check-equal? (subst-many (list (numC 3) (numC 5) (numC 8)) (list 'x 'y 'z)
-                          (leq0? (idC 'z) (idC 'x) (idC 'y))) (leq0? (numC 8) (numC 3) (numC 5)))
-(check-equal? (subst-many (list (numC 3) (numC 5)) (list 'x 'y)
-                          (FuncallC 'f (list (idC 'x) (idC 'y)))) (FuncallC 'f (list (numC 3) (numC 5))))
 
 ;gets the fundefiniton I want to substite with for my funcalls body
 (define (get-fundef [n : Symbol] [fds : (Listof FundefC)]) : FundefC
@@ -71,45 +65,71 @@
            (lambda () (get-fundef 'C (list (FundefC 'A (list 'x) (numC 5))
                                            (FundefC 'B (list 'y) (numC 6))))))
 
+;a helper function that consrtucts a a list of bindings from a list of args and arg-values
+(define (create-Bindings [l1 : (Listof Symbol)] [l2 : (Listof Value)]) : (Listof Bind)
+  (match l1
+    ['() '()]
+    [(cons f r) (cons (Bind f (first l2)) (create-Bindings r (rest l2)))])
+  )
+
+;test-case
+(check-equal? (create-Bindings (list 'f 'r 'h) (list 3 5 6)) (list (Bind 'f 3) (Bind 'r 5) (Bind 'h 6)))
+
 ;helper function for interpreting funcalls (eager property of interpreting args first)
-(define (interpret-funcalls [fname : Symbol] [paramVals : (Listof ExprC)] [lstfunc : (Listof FundefC)]) : Real
+(define (interpret-funcalls [fname : Symbol] [env : Env] [paramVals : (Listof ExprC)] [lstfunc : (Listof FundefC)]) : Value
   (define fn (get-fundef fname lstfunc))
   (define all-params (FundefC-params fn))
   (cond
     [(not (equal? (length all-params) (length paramVals))) (error 'JYSS "different length of args and values")]
-    [else (interp (subst-many (map (lambda ([paramV : ExprC])
-                                     (numC (interp paramV lstfunc))) paramVals) all-params
-                                                                                (FundefC-body fn)) lstfunc)]))
-    
+    [else (interp (FundefC-body fn) (append (create-Bindings all-params
+                                                           (map (lambda ([paramV : ExprC])
+                                                                             (interp paramV env lstfunc)) paramVals)) '()) lstfunc)]))
+
 ;helper function to create listof of exprC from args
 (define (my-params [s : (Listof Any)]) : (Listof ExprC)
   (cast s (Listof ExprC)))
 
-;the evaluator/interpreter which uses listof function definitions to evaluate expressions
-(define (interp [exp : ExprC] [lstfuncd : (Listof FundefC)]) : Real
-  (match exp
-    [(numC n) n]
-    [(idC s) (error 'JYSS "undefined variable error ~e" s)]
-    [(leq0? a b c) (if (<= (interp a lstfuncd) 0) (interp b lstfuncd) (interp c lstfuncd))]
-    [(binop o l r) (arithmeticOperator o (interp l lstfuncd) (interp r lstfuncd))]
-    [(FuncallC (? symbol? f) (list args ...)) (interpret-funcalls f (my-params args) lstfuncd)]))
+;lookup function for id/var refs in enviromnents table
+(define (lookup [id : Symbol] [env : Env]) : Value
+  (match env
+    ['() (error 'JYSS "empty or not in environments table")]
+    [(cons f r) (match f
+                  [(Bind a b)(cond
+                               [(equal? a id) b]
+                               [else (lookup id r)])])]
+    ))
 
 ;test-case
-(check-equal? (interp  (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
-                              (binop '- (binop '* (numC 2) (numC 3)) (numC 3))) '()) 4)
-(check-equal? (interp (leq0? (numC 4) (numC 4) (numC 800)) '()) 800)
-(check-equal? (interp (leq0? (numC -1) (numC 7) (numC -1)) '()) 7)
-(check-equal? (interp (FuncallC 'f (list (numC 3)))
+(check-equal? (lookup 'a (list (Bind 'f 5) (Bind 'a 4))) 4)
+(check-exn (regexp (regexp-quote "empty or not in environments table"))
+           (lambda () (lookup 'd (list (Bind 'f 5) (Bind 'a 4)))))
+
+
+;the evaluator/interpreter which uses listof function definitions to evaluate expressions
+(define (interp [exp : ExprC] [env : Env] [lstfuncd : (Listof FundefC)]) : Value
+  (match exp
+    [(numC n) n]
+    [(idC s) (lookup s env)]
+    [(leq0? a b c) (if (<= (cast (interp a env lstfuncd) Real) 0) (interp b env lstfuncd) (interp c env lstfuncd))]
+    [(binop o l r) (arithmeticOperator o (cast (interp l env lstfuncd) Real) (cast (interp r env lstfuncd) Real))]
+    [(FuncallC (? symbol? f) (list args ...)) (interpret-funcalls f env (my-params args) lstfuncd)]))
+
+;test-case
+(check-equal? (interp (binop '+ (binop '* (numC 1) (binop '/ (numC 2) (numC 2)))
+                              (binop '- (binop '* (numC 2) (numC 3)) (numC 3))) '() '()) 4)
+(check-equal? (interp (leq0? (numC 4) (numC 4) (numC 800)) '() '()) 800)
+(check-equal? (interp (leq0? (numC -1) (numC 7) (numC -1)) '() '()) 7)
+(check-equal? (interp (FuncallC 'f (list (numC 3))) '()
                       (list (FundefC 'f (list 'x) (binop '+ (idC 'x) (numC 1))))) 4)
 (check-exn (regexp (regexp-quote "division by 0"))
-           (lambda () (interp (binop '/ (numC 5) (numC 0)) '())))
-(check-exn (regexp (regexp-quote "undefined variable error"))
-           (lambda () (interp (idC 'y) '())))
+           (lambda () (interp (binop '/ (numC 5) (numC 0)) '()'())))
+(check-exn (regexp (regexp-quote "empty or not in environments table"))
+           (lambda () (interp (idC 'y) '() '())))
 
 ;Finds and interprets the function body of main 
 (define (interp-fns [lstfuncd : (Listof FundefC)]) : Real
   (match (get-fundef 'main lstfuncd)
-    [(FundefC 'main (list) exp) (interp exp lstfuncd)]))
+    [(FundefC 'main (list) exp) (cast (interp exp '() lstfuncd) Real)]))
 
 ;test-case
 (check-equal? (interp-fns (list (FundefC 'main (list) (binop '+ (numC 4) (numC 4))))) 8)
