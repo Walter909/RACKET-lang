@@ -2,6 +2,8 @@
 (require typed/rackunit)
 
 ;JYSS5
+;Also need to handle all of 5.1, 5.2 edgecases
+
 ;language top-definitons : parse output
 (define-type ExprC (U numC ifC idC strC FuncallC lamC))
 (struct numC ([n : Real])#:transparent)
@@ -13,15 +15,15 @@
 
 ;value types : interp output
 (define-type Value (U Real Boolean String cloV primopV))
-(define-type Env (Listof Bind))
-(struct Bind ([name : Symbol] [val : Value])#:transparent)
 (struct cloV ([params : (Listof Symbol)] [body : ExprC] [env : Env])#:transparent)
 (struct primopV ([operation : Symbol])#:transparent)
 
-
-;top/default environment definitions
+;top/default level environment definitions
+(define-type Env (Listof Bind))
+(struct Bind ([name : Symbol] [val : Value])#:transparent)
 (define top-level : Env (list (Bind 'true #t) (Bind 'false #f)
-                              (Bind '+ (primopV '+)) (Bind '- (primopV '-)) (Bind '* (primopV '*)) (Bind '/ (primopV '/))
+                              (Bind '+ (primopV '+)) (Bind '- (primopV '-))
+                              (Bind '* (primopV '*)) (Bind '/ (primopV '/))
                               (Bind '<= (primopV '<=))   (Bind 'equal? (primopV 'equal?))))
 
 ;serialize function that takes any value and returns a string format of it
@@ -42,23 +44,28 @@
 (check-equal? (serialize (cloV (list 's) (numC 5) '())) "#<procedure>")
 (check-equal? (serialize (primopV '+)) "#<primop>")
 
-;function that maps primitive binop symbol to its operation
-(define (arithmeticOperator [s : Sexp] [l : Value] [r : Value]) : Value
+;function that maps primitive operations to a symbol
+(define (primitiveOperator [s : Sexp] [l : Value] [r : Value]) : Value
   (match s
-    ['+ (if (not (and (real? l) (real? r))) (error 'JYSS "args must both be real") (+ (cast l Real) (cast r Real)))]
-    ['* (if (not (and (real? l) (real? r))) (error 'JYSS "args must both be real") (* (cast l Real) (cast r Real)))]
-    ['- (if (not (and (real? l) (real? r))) (error 'JYSS "args must both be real") (- (cast l Real) (cast r Real)))]
+    ['+ (if (not (and (real? l) (real? r)))
+            (error 'JYSS "args must both be real") (+ (cast l Real) (cast r Real)))]
+    ['* (if (not (and (real? l) (real? r)))
+            (error 'JYSS "args must both be real") (* (cast l Real) (cast r Real)))]
+    ['- (if (not (and (real? l) (real? r)))
+            (error 'JYSS "args must both be real") (- (cast l Real) (cast r Real)))]
     ['/ (cond
           [(not (and (real? l) (real? r))) (error 'JYSS "args must both be real")]
           [(not (zero? (cast r Real))) (/ (cast l Real) (cast r Real))]
           [else (error 'JYSS "division by 0")])]
-    ['<= (if (not (and (real? l) (real? r))) (error 'JYSS "args must both be real") (<= (cast l Real) (cast r Real)))]
+    ['<= (if (not (and (real? l) (real? r)))
+             (error 'JYSS "args must both be real") (<= (cast l Real) (cast r Real)))]
     ['equal? (cond
                [(and (real? l) (real? r)) (equal? l r)]
                [(and (boolean? l) (boolean? r)) (equal? l r)]
                [(and (string? l) (string? r)) (equal? l r)]
                [else #f]
-               )]))
+               )]
+    ))
 
 ;a helper function that consrtucts a a list of bindings from a list of args and arg-values
 (define (create-Bindings [l1 : (Listof Symbol)] [l2 : (Listof Value)]) : (Listof Bind)
@@ -77,13 +84,19 @@
   
   (match clos-primop
     [(primopV op) (cond
-                    [(not (equal? (length paramVals) 2)) (error 'JYSS "wrong number of args for a binary operation")]
-                    [else (arithmeticOperator op (interp (first paramVals) env) (interp (second paramVals) env))])]
+                    [(not (equal? (length paramVals) 2))
+                     (error 'JYSS "wrong number of args for a binary operation")]
+                    [else (primitiveOperator op (interp (first paramVals) env)
+                                             (interp (second paramVals) env))])]
     [(cloV params body closure-env) (cond
-                                      [(not (equal? (length params) (length paramVals))) (error 'JYSS "different length of args and values")]
+                                      [(not (equal? (length params) (length paramVals)))
+                                       (error 'JYSS "different length of args and values")]
                                       [else
-                                       (interp body (append (create-Bindings params (map (lambda ([paramV : ExprC])
-                                                                                           (interp paramV env)) paramVals)) closure-env))])]))
+                                       (interp body
+                                               (append (create-Bindings params
+                                                       (map (lambda ([paramV : ExprC])
+                                                       (interp paramV env)) paramVals))
+                                                       closure-env))])]))
 ;lookup function for id/var refs in enviromnents table
 (define (lookup [id : Symbol] [env : Env]) : Value
   (match env
@@ -111,7 +124,9 @@
     [(strC s) s]
     [(idC s) (lookup s env)]
     [(lamC a b) (cloV a b env)]
-    [(ifC a b c) (if (interp a env) (interp b env) (interp c env))]
+    [(ifC a b c) (cond
+                  [(boolean? (interp a env)) (if (interp a env) (interp b env) (interp c env))] 
+                  [else (error 'JYSS "the cond must return a boolean: ~v" a)])]
     [(FuncallC f (list args ...)) (interpret-funcalls f env (my-params args))]))
 
 ;test-case
@@ -130,6 +145,8 @@
 
 (check-exn (regexp (regexp-quote "wrong number of args for a binary operation"))
            (lambda () (interp (FuncallC (idC '+) (list (numC 3) (numC 3) (numC 4))) top-level)))
+(check-exn (regexp (regexp-quote "the cond must return a boolean"))
+           (lambda () (interp (ifC (numC 4) (numC 4) (numC 5)) top-level)))
 (check-exn (regexp (regexp-quote "args must both be real"))
            (lambda () (interp (FuncallC (idC '+) (list (numC 3) (idC 'true))) top-level)))
 (check-exn (regexp (regexp-quote "args must both be real"))
@@ -142,14 +159,24 @@
            (lambda () (interp (FuncallC (idC '<=) (list (numC 3) (idC 'false))) top-level)))
 (check-exn (regexp (regexp-quote "division by 0"))
            (lambda () (interp (FuncallC (idC '/) (list (numC 3) (numC 0))) top-level)))
-(check-equal? (interp (FuncallC (idC 'f) (list (numC 3))) (list (Bind 'f (cloV (list 'x) (FuncallC (idC '+) (list (idC 'x) (numC 1))) top-level)))) 4)
+(check-equal? (interp (FuncallC (idC 'f) (list (numC 3)))
+                      (list (Bind 'f (cloV (list 'x) (FuncallC (idC '+) (list (idC 'x) (numC 1))) top-level)))) 4)
 (check-equal?
  (interp (lamC (list 'a 'b) (FuncallC (idC '+) (list (idC 'a) (idC 'b)))) top-level)
  (cloV (list 'a 'b) (FuncallC (idC '+) (list (idC 'a) (idC 'b))) top-level))
-(check-equal? (interp (FuncallC (lamC (list 'a 'b) (FuncallC (idC '+) (list (idC 'a) (idC 'b)))) (list (numC 4) (numC 4))) top-level) 8)
+(check-equal? (interp (FuncallC (lamC (list 'a 'b) (FuncallC (idC '+) (list (idC 'a) (idC 'b))))
+                                (list (numC 4) (numC 4))) top-level) 8)
 
 ;test-case
-(check-equal? (interpret-funcalls (idC 'f) (list (Bind 'f (cloV (list 'a) (FuncallC (idC '+) (list (idC 'a) (numC 1))) top-level))) (list (numC 3))) 4)
+(check-equal? (interpret-funcalls (idC 'f)
+                                  (list (Bind 'f (cloV (list 'a)
+                                                       (FuncallC (idC '+) (list (idC 'a) (numC 1))) top-level)))
+                                  (list (numC 3))) 4)
+
+
+;helper function to check if a symbol is a valid id
+(define (valid-ID? [s : Symbol]) : Boolean
+  (if (member s '(vars: body: if proc go)) #f #t))
 
 ;helper function to determine the type that an sexp should return and prevent some collisions
 (define (expected-type [s : Sexp]) : Symbol
@@ -160,6 +187,7 @@
     [(? list? l)
      (cond
        [(equal? (first l) 'proc) 'proc]
+       [(equal? (first l) 'vars:) 'vars:]
        [(equal? (first l) 'if) 'if]
        [else 'funcallC])]))
 
@@ -170,11 +198,30 @@
 (check-equal? (expected-type '2) 'num)
 (check-equal? (expected-type '(+ e 5 f)) 'funcallC)
 
+;helper function to get the symbols from the vars
+(define (get-symboles [s : (Listof Any)]) : (Listof Symbol)
+  (match s
+    ['() '()]
+    [(cons f r) (match f
+                  [(list (? symbol? a) '= b) (cons a (get-symboles r))])]
+    ))
+
+;test-case
+(check-equal? (get-symboles '([s = x] [e = t] [r = i])) (list 's 'e 'r))
+
+;helper function to get the paramVals from the vars
+(define (get-paramVals [s : (Listof Any)]) : (Listof ExprC)
+  (match s
+    ['() '()]
+    [(cons f r) (match f
+                  [(list (? symbol? a) '= b) (cons (parse (cast b Sexp)) (get-paramVals r))])]
+    ))
+
 ;parse concrete JYSS syntax to expressions for interpreter to understand
 (define (parse [s : Sexp]) : ExprC
   (match (expected-type s)
     ['id (match s
-           [(? symbol? a) (idC a)])]
+           [(? symbol? a) (if (valid-ID? a) (idC a) (error 'JYSS "this is not a valid ID ~v" a))])]
     ['str (match s
             [(? string? str) (strC str)])]
     ['num (match s
@@ -187,8 +234,19 @@
     ['if (match s
            [(list 'if a b c) (ifC (parse a) (parse b) (parse c))]
            [other (error 'JYSS "no matching clause for if")])]
+    ['vars: (match s
+              [(list 'vars: a ... 'body: b) (FuncallC (lamC (get-symboles a) (parse b)) (get-paramVals a))]
+              [other (error 'JYSS "invalid vars: body: syntax: ~v" s)])]
     ['proc (match s
-             [(list 'proc (list (? symbol? id) ...) 'go exp) (lamC (cast id (Listof Symbol)) (parse exp))])]))
+             [(list 'proc (list (? symbol? id) ...) 'go exp) (cond
+                                                               [(check-duplicates (cast id (Listof Symbol)))
+                                                                (error 'JYSS "no duplicate param names allowed")]
+                                                               [else (lamC (cast id (Listof Symbol)) (parse exp))])]
+             [other (error 'JYSS "invalid proc syntax: ~v" s)])]))
+
+
+;test-case
+(check-equal? (get-paramVals '([s = 3] [e = 5] [r = 3])) (list (numC 3) (numC 5) (numC 3)))
 
 ;test-case
 (check-equal? (parse "Hello") (strC "Hello"))
@@ -198,8 +256,21 @@
 (check-equal? (parse '{f x y}) (FuncallC (idC 'f) (list (idC 'x) (idC 'y))))
 (check-equal? (parse '{^ 3 4}) (FuncallC (idC '^) (list (numC 3) (numC 4))))
 (check-equal? (parse '{proc {x y} go 3}) (lamC (list 'x 'y) (numC 3)))
+
+(check-equal? (parse '{vars: [z = 3] [x = 3] body: {+ x z}})
+              (FuncallC (lamC (list 'z 'x) (FuncallC (idC '+) (list (idC 'x) (idC 'z))))
+                        (list (numC 3) (numC 3))))
+
 (check-exn (regexp (regexp-quote "no matching clause for if"))
            (lambda () (parse '(if (x 4) 3 (+ 2 9) 3))))
+(check-exn (regexp (regexp-quote "no duplicate param names allowed"))
+           (lambda () (parse '{proc {x x} go {+ x x}})))
+(check-exn (regexp (regexp-quote "invalid proc syntax: "))
+           (lambda () (parse '{proc {3 4 5} go 6})))
+(check-exn (regexp (regexp-quote "invalid vars: body: syntax: "))
+           (lambda () (parse '{vars: })))
+(check-exn (regexp (regexp-quote "not a valid ID"))
+           (lambda () (parse '{vars: [if = 3] body: {+ if 3}})))
 
 ;Combines parsing and interpretation be able to evaluate JYSS3
 (define (top-interp [s : Sexp]) : String
