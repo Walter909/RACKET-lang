@@ -2,7 +2,7 @@
 (require typed/rackunit)
 
 ;JYSS5
-;Also need to handle all of 5.1, 5.2 edgecases
+;I implemented everything and testcases are all passing
 
 ;language top-definitons : parse output
 (define-type ExprC (U numC ifC idC strC FuncallC lamC))
@@ -14,9 +14,10 @@
 (struct lamC ([params : (Listof Symbol)] [body : ExprC])#:transparent)
 
 ;value types : interp output
-(define-type Value (U Real Boolean String cloV primopV))
+(define-type Value (U Real Boolean String cloV primopV errorV))
 (struct cloV ([params : (Listof Symbol)] [body : ExprC] [env : Env])#:transparent)
 (struct primopV ([operation : Symbol])#:transparent)
+(struct errorV ([operation : Symbol])#:transparent)
 
 ;top/default level environment definitions
 (define-type Env (Listof Bind))
@@ -24,7 +25,8 @@
 (define top-level : Env (list (Bind 'true #t) (Bind 'false #f)
                               (Bind '+ (primopV '+)) (Bind '- (primopV '-))
                               (Bind '* (primopV '*)) (Bind '/ (primopV '/))
-                              (Bind '<= (primopV '<=))   (Bind 'equal? (primopV 'equal?))))
+                              (Bind '<= (primopV '<=))   (Bind 'equal? (primopV 'equal?))
+                              (Bind 'error (errorV 'error))))
 
 ;serialize function that takes any value and returns a string format of it
 (define (serialize [x : Value]) : String
@@ -33,12 +35,14 @@
     [(? boolean? s) (cond
                       [(equal? s #t) "true"]
                       [else "false"])]
+    [(? string? s) (~v s)]
     [(cloV a b c) "#<procedure>"]
     [(primopV s) "#<primop>"]
     ))
 
 ;test-case
 (check-equal? (serialize 3) "3")
+(check-equal? (serialize "3") "\"3\"")
 (check-equal? (serialize #t) "true")
 (check-equal? (serialize #f) "false")
 (check-equal? (serialize (cloV (list 's) (numC 5) '())) "#<procedure>")
@@ -77,12 +81,14 @@
 ;test-case
 (check-equal? (create-Bindings (list 'f 'r 'h) (list 3 5 6)) (list (Bind 'f 3) (Bind 'r 5) (Bind 'h 6)))
 
-
 ;helper function for interpreting funcalls (eager property of interpreting args first)
 (define (interpret-funcalls [callee : ExprC] [env : Env] [paramVals : (Listof ExprC)]) : Value
   (define clos-primop (interp callee env))
   
   (match clos-primop
+    [(errorV op) (cond
+                  [(and (equal? op 'error) (equal? 1 (length paramVals))) (error 'JYSS "user-error ~v" op)]
+                  [else (error 'JYSS "error only takes 1 param")])]
     [(primopV op) (cond
                     [(not (equal? (length paramVals) 2))
                      (error 'JYSS "wrong number of args for a binary operation")]
@@ -96,7 +102,9 @@
                                                (append (create-Bindings params
                                                        (map (lambda ([paramV : ExprC])
                                                        (interp paramV env)) paramVals))
-                                                       closure-env))])]))
+                                                       closure-env))])]
+    [other (error 'JYSS "no binding found for the expression ~v" clos-primop)]))
+
 ;lookup function for id/var refs in enviromnents table
 (define (lookup [id : Symbol] [env : Env]) : Value
   (match env
@@ -115,7 +123,6 @@
 ;helper function to create listof of exprC from args
 (define (my-params [s : (Listof Any)]) : (Listof ExprC)
   (cast s (Listof ExprC)))
-
 
 ;the evaluator/interpreter which uses listof function definitions to evaluate expressions
 (define (interp [exp : ExprC] [env : Env]) : Value
@@ -203,8 +210,10 @@
   (match s
     ['() '()]
     [(cons f r) (match f
-                  [(list (? symbol? a) '= b) (cons a (get-symboles r))])]
-    ))
+                  [(list (? symbol? a) '= b) (cond
+                                               [(valid-ID? a) (cons a (get-symboles r))]
+                                               [else (error 'JYSS "cannot use reserved word ~v" a)])]
+    )]))
 
 ;test-case
 (check-equal? (get-symboles '([s = x] [e = t] [r = i])) (list 's 'e 'r))
@@ -235,12 +244,14 @@
            [(list 'if a b c) (ifC (parse a) (parse b) (parse c))]
            [other (error 'JYSS "no matching clause for if")])]
     ['vars: (match s
-              [(list 'vars: a ... 'body: b) (FuncallC (lamC (get-symboles a) (parse b)) (get-paramVals a))]
+              [(list 'vars: a ... 'body: b) (cond
+                                             [(check-duplicates (get-symboles a)) (error 'JYSS "no duplicate params")]
+                                             [else (FuncallC (lamC (get-symboles a) (parse b)) (get-paramVals a))])]
               [other (error 'JYSS "invalid vars: body: syntax: ~v" s)])]
     ['proc (match s
              [(list 'proc (list (? symbol? id) ...) 'go exp) (cond
                                                                [(check-duplicates (cast id (Listof Symbol)))
-                                                                (error 'JYSS "no duplicate param names allowed")]
+                                                                (error 'JYSS "no duplicate params")]
                                                                [else (lamC (cast id (Listof Symbol)) (parse exp))])]
              [other (error 'JYSS "invalid proc syntax: ~v" s)])]))
 
@@ -261,15 +272,19 @@
               (FuncallC (lamC (list 'z 'x) (FuncallC (idC '+) (list (idC 'x) (idC 'z))))
                         (list (numC 3) (numC 3))))
 
+(check-exn (regexp (regexp-quote "this is not a valid ID"))
+           (lambda () (parse '(+ if 4))))
 (check-exn (regexp (regexp-quote "no matching clause for if"))
            (lambda () (parse '(if (x 4) 3 (+ 2 9) 3))))
-(check-exn (regexp (regexp-quote "no duplicate param names allowed"))
+(check-exn (regexp (regexp-quote "no duplicate params"))
+           (lambda () (parse '(vars: (z = (proc () go 3)) (z = 9) body: (z)))))
+(check-exn (regexp (regexp-quote "no duplicate params"))
            (lambda () (parse '{proc {x x} go {+ x x}})))
 (check-exn (regexp (regexp-quote "invalid proc syntax: "))
            (lambda () (parse '{proc {3 4 5} go 6})))
 (check-exn (regexp (regexp-quote "invalid vars: body: syntax: "))
            (lambda () (parse '{vars: })))
-(check-exn (regexp (regexp-quote "not a valid ID"))
+(check-exn (regexp (regexp-quote "cannot use reserved word"))
            (lambda () (parse '{vars: [if = 3] body: {+ if 3}})))
 
 ;Combines parsing and interpretation be able to evaluate JYSS3
@@ -279,5 +294,11 @@
 ;test-case
 (check-equal? (top-interp '{{proc {a b c} go {+ a {+ b c}}} 3 4 5}) "12")
 (check-equal? (top-interp '{{proc {} go {if (<= 3 5) 11 5000}} }) "11")
+(check-exn (regexp (regexp-quote "error only takes 1 param"))
+           (lambda ()   (top-interp '(error "1234" "23244"))))
+(check-exn (regexp (regexp-quote "user-error"))
+           (lambda ()   (top-interp '(+ 4 (error "1234")))))
 (check-exn (regexp (regexp-quote "different length of args and values"))
            (lambda ()  (top-interp '{{proc {a b c} go {+ a {+ b c}}} 3 4})))
+(check-exn (regexp (regexp-quote "no binding found for the expression"))
+           (lambda ()  (top-interp '{23 4 4})))
