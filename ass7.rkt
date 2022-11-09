@@ -2,7 +2,7 @@
 (require typed/rackunit)
 
 ;JYSS7
-;need to add substring to my environments
+;I implemented everything and all my testcases pass
 ;expression definitons : parse output
 (define-type TyExprC (U numC ifC idC strC AppC lamC recC))
 (struct numC ([n : Real])#:transparent)
@@ -42,7 +42,7 @@
 ;type enviromnent
 (define-type TyEnv (Listof TyBind))
 (struct TyBind ([name : Symbol] [ty : Type])#:transparent)
-(define top-level-types : TyEnv (list (TyBind 'true (boolT)) (TyBind 'false (boolT))
+(define base-tenv : TyEnv (list (TyBind 'true (boolT)) (TyBind 'false (boolT))
                                       (TyBind '+ (funT (list (numT) (numT)) (numT)))
                                       (TyBind '- (funT (list (numT) (numT)) (numT)))
                                       (TyBind '* (funT (list (numT) (numT)) (numT)))
@@ -77,23 +77,22 @@
       ))
 
 ;helper function for type-checking AppC's (funcalls) types
-(define (type-checker-appC [callee : TyExprC] [vals : (Listof TyExprC)] [tenv : TyEnv]) : Type
-  (define ft (type-checker callee tenv))
-  (define valst (map (lambda ([val : TyExprC]) (type-checker val tenv)) vals))
+(define (type-check-appC [callee : TyExprC] [vals : (Listof TyExprC)] [tenv : TyEnv]) : Type
+  (define ft (type-check callee tenv))
+  (define valst (map (lambda ([val : TyExprC]) (type-check val tenv)) vals))
   (cond
     [(not (funT? ft)) (error 'JYSS "not a function type ~e" ft)]
     [(not (valid-args? (funT-args ft) valst)) (error 'JYSS "arg type mismatch ~e ~e" (funT-args ft) valst)]
     [else (funT-ret ft)]))
 
 ;helper function for type-checking recC'S (recursive calls) types
-(define (type-checker-recC [recName : Symbol] [args : (Listof Symbol)] [argsTy : (Listof Type)]
+(define (type-check-recC [recName : Symbol] [args : (Listof Symbol)] [argsTy : (Listof Type)]
                            [retTy : Type] [bdy : TyExprC] [use : TyExprC] [tenv : TyEnv]) : Type
-  
   (define extended-env (cons (TyBind recName (funT argsTy retTy)) tenv))
-  (define body-type (type-checker bdy (append (create-type-Bindings args argsTy) extended-env)))
+  (define body-type (type-check bdy (append (create-type-Bindings args argsTy) extended-env)))
      (cond
        [(not (equal? retTy body-type)) (error 'JYSS "body return type not correct ~e ~e" retTy body-type)]
-          [else (type-checker use extended-env)]))
+          [else (type-check use extended-env)]))
 
 ;a helper function that consrtucts a list of tyep bindings from a list of args and types
 (define (create-type-Bindings [l1 : (Listof Symbol)] [l2 : (Listof Type)]) : (Listof TyBind)
@@ -103,44 +102,21 @@
   )
 
 ;our type checker that parses our language types
-(define (type-checker [expr : TyExprC] [tenv : TyEnv]) : Type
+(define (type-check [expr : TyExprC] [tenv : TyEnv]) : Type
   (match expr
     [(numC n) (numT)]
     [(strC s) (strT)]
     [(idC i) (lookup-type i tenv)]
     [(ifC a b c) (cond
-                   [(boolT? (type-checker a tenv))
-                    (if (equal? (type-checker b tenv) (type-checker c tenv))
-                        (type-checker b tenv)
+                   [(boolT? (type-check a tenv))
+                    (if (equal? (type-check b tenv) (type-check c tenv))
+                        (type-check b tenv)
                         (error 'JYSS "if must have the same return types"))]
                    [else (error 'JYSS "type mismatch for if conditional ~e" a)])]
-    [(AppC f (list a ...)) (type-checker-appC f a tenv)]
-    [(recC recName args argsTy retTy namebdy use) (type-checker-recC recName args argsTy retTy namebdy use tenv)]
-    [(lamC args argsTy bdy) (funT argsTy (type-checker bdy (append (create-type-Bindings args argsTy) tenv)))]
+    [(AppC f (list a ...)) (type-check-appC f a tenv)]
+    [(recC recName args argsTy retTy namebdy use) (type-check-recC recName args argsTy retTy namebdy use tenv)]
+    [(lamC args argsTy bdy) (funT argsTy (type-check bdy (append (create-type-Bindings args argsTy) tenv)))]
     ))
-
-;test-case
-(check-equal? (type-checker (numC 4) '()) (numT))
-(check-equal? (type-checker (strC "house") '()) (strT))
-(check-equal? (type-checker (idC 'false) top-level-types) (boolT))
-(check-equal? (type-checker (ifC (idC 'true) (strC "E") (strC "car")) top-level-types) (strT))
-
-(check-equal? (type-checker (AppC (idC '+) (list (numC 3) (numC 4))) top-level-types) (numT))
-
-(check-equal? (type-checker (lamC (list 'x) (list (numT))
-                                  (AppC (idC '+) (list (numC 4) (idC 'x)))) top-level-types)
-              (funT (list (numT)) (numT)))
-
-(check-equal?
- (type-checker (recC 'square (list 'x)
-                     (list (numT)) (numT)
-                     (AppC (idC 'square) (list (idC 'x))) (AppC (idC 'square) (list (numC 3)))) top-level-types)
- (numT))
-
-(check-exn (regexp (regexp-quote "type mismatch for if conditional"))
-           (lambda () (type-checker (ifC (numC 9) (numC 3) (numC 3)) top-level-types)))
-(check-exn (regexp (regexp-quote "if must have the same return types"))
-           (lambda () (type-checker (ifC (idC 'true) (numC 3) (strC "car")) top-level-types)))
 
 ;serialize function that takes any value and returns a string format of it
 (define (serialize [x : Value]) : String
@@ -237,8 +213,6 @@
                                [else (get-box id r)])])]
     ))
 
-
-
 ;helper function to create listof of TyExprC from args
 (define (my-params [s : (Listof Any)]) : (Listof TyExprC)
   (cast s (Listof TyExprC)))
@@ -313,7 +287,7 @@
     ['num (numT)]
     ['bool (boolT)]
     ['str (strT)]
-    [(list (? symbol? a) ... '-> b) (funT (map parse-type (cast a (Listof Sexp))) (parse-type b))]
+    [(list a ... '-> b) (funT (map parse-type (cast a (Listof Sexp))) (parse-type b))]
     [other (error 'JYSS "unknown type ~e" a)])
   )
 
@@ -375,8 +349,9 @@
 ;Combines parsing and interpretation be able to evaluate JYSS3
 (define (top-interp [s : Sexp]) : String
   (define parsed-JYSS (parse s))
-  (type-checker parsed-JYSS top-level-types)
+  (type-check parsed-JYSS base-tenv)
   (serialize (interp parsed-JYSS top-level)))
+
 
 ;test-case
 (check-equal? (top-interp '{{proc {[a : num] [b : num] [c : num]} go {+ a {+ b c}}} 3 4 5}) "12")
@@ -420,8 +395,6 @@
 
 ;test-case
 (check-equal? (parse "Hello") (strC "Hello"))
-
-(check-equal? (parse (quote (proc ((a : ((num -> str) (str -> num) -> (bool -> bool)))) go 8))) "true")
 (check-equal? (parse '{a})  (AppC (idC 'a) (list)))
 (check-equal? (parse '{if 4 5 5}) (ifC (numC 4) (numC 5) (numC 5)))
 (check-equal? (parse '{f x}) (AppC (idC 'f) (list (idC 'x))))
@@ -543,3 +516,27 @@
 
 (check-exn (regexp (regexp-quote "unknown type"))
            (lambda () (parse-type 'aa)))
+
+;test-cases
+(check-equal? (type-check (numC 4) '()) (numT))
+(check-equal? (type-check (strC "house") '()) (strT))
+(check-equal? (type-check (idC 'false) base-tenv) (boolT))
+(check-equal? (type-check (ifC (idC 'true) (strC "E") (strC "car")) base-tenv) (strT))
+
+(check-equal? (type-check (AppC (idC '+) (list (numC 3) (numC 4))) base-tenv) (numT))
+
+(check-equal? (type-check (lamC (list 'x) (list (numT))
+                                  (AppC (idC '+) (list (numC 4) (idC 'x)))) base-tenv)
+              (funT (list (numT)) (numT)))
+
+(check-equal?
+ (type-check (recC 'square (list 'x)
+                     (list (numT)) (numT)
+                     (AppC (idC 'square) (list (idC 'x))) (AppC (idC 'square) (list (numC 3)))) base-tenv)
+ (numT))
+
+(check-exn (regexp (regexp-quote "type mismatch for if conditional"))
+           (lambda () (type-check (ifC (numC 9) (numC 3) (numC 3)) base-tenv)))
+(check-exn (regexp (regexp-quote "if must have the same return types"))
+           (lambda () (type-check (ifC (idC 'true) (numC 3) (strC "car")) base-tenv)))
+
