@@ -1,8 +1,8 @@
-#lang typed/racket
+ #lang typed/racket
 (require typed/rackunit)
 
 ;JYSS7
-;TODO add num-eq,str-eq to environments and get rid of equal?
+;need to add substring to my environments
 ;expression definitons : parse output
 (define-type TyExprC (U numC ifC idC strC AppC lamC recC))
 (struct numC ([n : Real])#:transparent)
@@ -11,27 +11,32 @@
 (struct ifC ([test : TyExprC] [then : TyExprC] [else : TyExprC])#:transparent)
 (struct AppC ([func : TyExprC] [paramVals : (Listof TyExprC)])#:transparent)
 (struct lamC ([params : (Listof Symbol)] [paramsTy : (Listof Type)] [body : TyExprC])#:transparent)
-(struct recC ([name : Symbol] [params : (Listof Symbol)] [paramsTy : (Listof Type)] [retTy : Type] [nameBdy : TyExprC] [use : TyExprC])#:transparent)
+(struct recC ([recName : Symbol] [params : (Listof Symbol)] [paramsTy : (Listof Type)]
+                                 [retTy : Type] [nameBdy : TyExprC] [use : TyExprC])#:transparent)
 
 ;value definitions : interp output
 (define-type Value (U Real Boolean String cloV primopV errorV))
 (struct cloV ([params : (Listof Symbol)] [body : TyExprC] [env : Env])#:transparent)
 (struct primopV ([operation : Symbol])#:transparent)
-(struct errorV ([operation : Symbol])#:transparent)
+(struct errorV ()#:transparent)
 
 ;top/default level environment definitions
 (define-type Env (Listof Bind))
-(struct Bind ([name : Symbol] [val : Value])#:transparent)
-(define top-level : Env (list (Bind 'true #t) (Bind 'false #f)
-                              (Bind '+ (primopV '+)) (Bind '- (primopV '-))
-                              (Bind '* (primopV '*)) (Bind '/ (primopV '/))
-                              (Bind '<= (primopV '<=)) (Bind 'error (errorV 'error))))
+(struct Bind ([name : Symbol] [val : (Boxof Value)])#:transparent)
+(define top-level : Env (list (Bind 'true (box #t)) (Bind 'false (box #f))
+                              (Bind '+ (box (primopV '+))) (Bind '- (box (primopV '-)))
+                              (Bind '* (box (primopV '*))) (Bind '/ (box (primopV '/)))
+                              (Bind 'num-eq? (box (primopV 'num-eq?))) (Bind 'str-eq? (box (primopV 'str-eq?)))
+                              (Bind '<= (box (primopV '<=))) (Bind 'substring (box (primopV 'substring)))
+                              (Bind 'error (box (errorV)))))
 
 ;type definitions : type-check output
-(define-type Type (U numT strT boolT funT))
+(define-type Type (U numT strT boolT funT anyT nullT))
 (struct numT ()#:transparent)
 (struct boolT ()#:transparent)
 (struct strT ()#:transparent)
+(struct nullT ()#:transparent)
+(struct anyT ()#:transparent)
 (struct funT ([args : (Listof Type)] [ret : Type])#:transparent)
 
 ;type enviromnent
@@ -42,17 +47,34 @@
                                       (TyBind '- (funT (list (numT) (numT)) (numT)))
                                       (TyBind '* (funT (list (numT) (numT)) (numT)))
                                       (TyBind '/ (funT (list (numT) (numT)) (numT)))
-                                      (TyBind '<= (funT (list (numT) (numT)) (boolT)))))
+                                      (TyBind 'num-eq? (funT (list (numT) (numT)) (boolT)))
+                                      (TyBind 'str-eq? (funT (list (strT) (strT)) (boolT)))
+                                      (TyBind 'substring (funT (list (strT) (numT) (numT)) (strT)))
+                                      (TyBind '<= (funT (list (numT) (numT)) (boolT)))
+                                      (TyBind 'error (funT (list (anyT)) (nullT)))
+                                      ))
 
 ;lookup for id's in our type environments table
 (define (lookup-type [id : Symbol] [env : TyEnv]) : Type
   (match env
-    ['() (error 'JYSS "empty or not in environments table ~e" id)]
+    ['() (error 'JYSS "empty or not in type environments table ~e" id)]
     [(cons f r) (match f
                   [(TyBind a b)(cond
                                [(equal? a id) b]
                                [else (lookup-type id r)])])]
     ))
+
+
+;helper function to make sure the arg types in both lists match
+(define (valid-args? [ft-types : (Listof Type)] [val-types : (Listof Type)]) : Boolean
+  (if (not (equal? (length ft-types) (length val-types))) (error 'JYSS "type arity mismatch")
+      (match ft-types
+        ['() #t]
+        [(cons f r) (if (or (equal? f (first val-types)) (anyT? f))
+                        (valid-args? r (rest val-types))
+                        #f
+                        )])
+      ))
 
 ;helper function for type-checking AppC's (funcalls) types
 (define (type-checker-appC [callee : TyExprC] [vals : (Listof TyExprC)] [tenv : TyEnv]) : Type
@@ -60,12 +82,14 @@
   (define valst (map (lambda ([val : TyExprC]) (type-checker val tenv)) vals))
   (cond
     [(not (funT? ft)) (error 'JYSS "not a function type ~e" ft)]
-    [(not (equal? (funT-args ft) valst)) (error 'JYSS "arg type mismatch ~e ~e" (funT-args ft) valst)]
+    [(not (valid-args? (funT-args ft) valst)) (error 'JYSS "arg type mismatch ~e ~e" (funT-args ft) valst)]
     [else (funT-ret ft)]))
 
 ;helper function for type-checking recC'S (recursive calls) types
-(define (type-checker-recC [name : Symbol] [args : (Listof Symbol)] [argsTy : (Listof Type)] [retTy : Type] [bdy : TyExprC] [use : TyExprC] [tenv : TyEnv]) : Type  
-  (define extended-env (cons (TyBind name (funT argsTy retTy)) tenv))
+(define (type-checker-recC [recName : Symbol] [args : (Listof Symbol)] [argsTy : (Listof Type)]
+                           [retTy : Type] [bdy : TyExprC] [use : TyExprC] [tenv : TyEnv]) : Type
+  
+  (define extended-env (cons (TyBind recName (funT argsTy retTy)) tenv))
   (define body-type (type-checker bdy (append (create-type-Bindings args argsTy) extended-env)))
      (cond
        [(not (equal? retTy body-type)) (error 'JYSS "body return type not correct ~e ~e" retTy body-type)]
@@ -91,7 +115,7 @@
                         (error 'JYSS "if must have the same return types"))]
                    [else (error 'JYSS "type mismatch for if conditional ~e" a)])]
     [(AppC f (list a ...)) (type-checker-appC f a tenv)]
-    [(recC name args argsTy retTy namebdy use) (type-checker-recC name args argsTy retTy namebdy use tenv)]
+    [(recC recName args argsTy retTy namebdy use) (type-checker-recC recName args argsTy retTy namebdy use tenv)]
     [(lamC args argsTy bdy) (funT argsTy (type-checker bdy (append (create-type-Bindings args argsTy) tenv)))]
     ))
 
@@ -103,10 +127,15 @@
 
 (check-equal? (type-checker (AppC (idC '+) (list (numC 3) (numC 4))) top-level-types) (numT))
 
-(check-equal? (type-checker (lamC (list 'x) (list (numT)) (AppC (idC '+) (list (numC 4) (idC 'x)))) top-level-types) (funT (list (numT)) (numT)))
+(check-equal? (type-checker (lamC (list 'x) (list (numT))
+                                  (AppC (idC '+) (list (numC 4) (idC 'x)))) top-level-types)
+              (funT (list (numT)) (numT)))
 
 (check-equal?
- (type-checker (recC 'square (list 'x) (list (numT)) (numT) (AppC (idC 'square) (list (idC 'x))) (AppC (idC 'square) (list (numC 3)))) top-level-types) (numT))
+ (type-checker (recC 'square (list 'x)
+                     (list (numT)) (numT)
+                     (AppC (idC 'square) (list (idC 'x))) (AppC (idC 'square) (list (numC 3)))) top-level-types)
+ (numT))
 
 (check-exn (regexp (regexp-quote "type mismatch for if conditional"))
            (lambda () (type-checker (ifC (numC 9) (numC 3) (numC 3)) top-level-types)))
@@ -125,7 +154,7 @@
     [(primopV s) "#<primop>"]
     ))
 
-;function that maps primitive operations to a symbol
+;function that maps primitive operations to a symbol (no type checking is necessary here change later)
 (define (primitiveOperator [s : Sexp] [l : Value] [r : Value]) : Value
   (match s
     ['+ (if (not (and (real? l) (real? r)))
@@ -140,19 +169,23 @@
           [else (error 'JYSS "division by 0")])]
     ['<= (if (not (and (real? l) (real? r)))
              (error 'JYSS "args must both be real") (<= l r))]
-    ['equal? (cond
-               [(and (real? l) (real? r)) (equal? l r)]
-               [(and (boolean? l) (boolean? r)) (equal? l r)]
-               [(and (string? l) (string? r)) (equal? l r)]
-               [else #f]
-               )]
+    ['num-eq? (equal? l r)]
+    ['str-eq? (equal? l r)]
     ))
+
+;function for the substring primitive operatore that takes 3 args
+(define (primitive-substring [s : Sexp] [str : Value] [begin : Value] [end : Value]) : Value
+  (match s
+    ['substring  (substring (cast str String) (cast begin Integer) (cast end Integer))]
+    [other (error 'JYSS "not a substring ~e" s)]
+    ))
+    
 
 ;a helper function that constuct a list of bindings from a list of args and arg-values
 (define (create-Bindings [l1 : (Listof Symbol)] [l2 : (Listof Value)]) : (Listof Bind)
   (match l1
     ['() '()]
-    [(cons f r) (cons (Bind f (first l2)) (create-Bindings r (rest l2)))])
+    [(cons f r) (cons (Bind f (box (first l2))) (create-Bindings r (rest l2)))])
   )
 
 ;helper function for interpreting funcalls (eager property of interpreting args first)
@@ -160,24 +193,28 @@
   (define clos-primop (interp callee env))
   
   (match clos-primop
-    [(errorV op) (cond
-                  [(and (equal? op 'error) (equal? 1 (length paramVals))) (error 'JYSS "user-error ~v" op)]
-                  [else (error 'JYSS "error only takes 1 param")])]
+    [(errorV) (error 'JYSS "user-error ~e" (serialize (interp (first paramVals) env)))]
     [(primopV op) (cond
-                    [(not (equal? (length paramVals) 2))
-                     (error 'JYSS "wrong number of args for a binary operation")]
-                    [else (primitiveOperator op (interp (first paramVals) env)
-                                             (interp (second paramVals) env))])]
-    [(cloV params body closure-env) (cond
-                                      [(not (equal? (length params) (length paramVals)))
-                                       (error 'JYSS "different length of args and values")]
-                                      [else
-                                       (interp body
+                    [(equal? (length paramVals) 2)
+                     (primitiveOperator op (interp (first paramVals) env) (interp (second paramVals) env))]
+                    [(equal? (length paramVals) 3)
+                     (primitive-substring op (interp (first paramVals) env)
+                                          (interp (second paramVals) env) (interp (third paramVals) env))] 
+                    [else (error 'JYSS "wrong number of args ~e" op)])]
+    [(cloV params body closure-env) (interp body
                                                (append (create-Bindings params
                                                        (map (lambda ([paramV : TyExprC])
                                                        (interp paramV env)) paramVals))
-                                                       closure-env))])]
-    [other (error 'JYSS "no binding found for the expression ~v" clos-primop)]))
+                                                       closure-env))]))
+
+;helper function to interpret rec-funcalls
+(define (interpret-rec-funcalls [recName : Symbol]
+                                [args : (Listof Symbol)] [bdy : TyExprC]
+                                [use : TyExprC] [env : (Listof Bind)]) : Value
+  (define rec-in-env (cloV args bdy env))
+  (set-box! (get-box recName env) rec-in-env)
+  (interp use env)
+  )
 
 ;lookup function for id/var refs in enviromnents table
 (define (lookup [id : Symbol] [env : Env]) : Value
@@ -185,9 +222,22 @@
     ['() (error 'JYSS "empty or not in environments table ~e" id)]
     [(cons f r) (match f
                   [(Bind a b)(cond
-                               [(equal? a id) b]
+                               [(equal? a id) (unbox b)]
                                [else (lookup id r)])])]
     ))
+
+
+;a helper function for rec: in to get the box instead of value in our environments (similar to lookup)
+(define (get-box [id : Symbol] [env : Env]) : (Boxof Value)
+  (match env
+    ['() (error 'JYSS "empty or not in environments table ~e" id)]
+    [(cons f r) (match f
+                  [(Bind a b)(cond
+                               [(equal? a id) b]
+                               [else (get-box id r)])])]
+    ))
+
+
 
 ;helper function to create listof of TyExprC from args
 (define (my-params [s : (Listof Any)]) : (Listof TyExprC)
@@ -203,7 +253,9 @@
     [(ifC a b c) (cond
                   [(boolean? (interp a env)) (if (interp a env) (interp b env) (interp c env))] 
                   [else (error 'JYSS "the cond must return a boolean: ~v" a)])]
-    [(AppC f (list args ...)) (interpret-funcalls f env (my-params args))]))
+    [(AppC f (list args ...)) (interpret-funcalls f env (my-params args))]
+    [(recC recName args argsTy retTy bdy use)
+     (interpret-rec-funcalls recName args bdy use (cons (Bind recName (box "dummy")) env))]))
 
 ;helper function to check if a symbol is a valid id
 (define (valid-ID? [s : Symbol]) : Boolean
@@ -262,7 +314,7 @@
     ['bool (boolT)]
     ['str (strT)]
     [(list (? symbol? a) ... '-> b) (funT (map parse-type (cast a (Listof Sexp))) (parse-type b))]
-    [other (error 'JYSS "unknown return type ~e" a)])
+    [other (error 'JYSS "unknown type ~e" a)])
   )
 
 ;helper function to get the list of arg types from the vars syntax
@@ -303,17 +355,21 @@
     ['vars: (match s
               [(list 'vars: a ... 'body: b) (cond
                                              [(check-duplicates (get-symboles a)) (error 'JYSS "no duplicate params")]
-                                             [else (AppC (lamC (get-symboles a) (get-arg-types a) (parse b)) (get-paramVals a))])]
+                                             [else (AppC (lamC (get-symboles a)
+                                                               (get-arg-types a) (parse b)) (get-paramVals a))])]
               [other (error 'JYSS "invalid vars: body: syntax: ~v" s)])]
     ['proc (match s
              [(list 'proc (list a ...) 'go exp) (cond
                                                      [(check-duplicates (get-symboles-proc a))
                                                          (error 'JYSS "no duplicate params")]
-                                                     [else (lamC (get-symboles-proc a) (get-arg-types-proc a) (parse exp))])]
+                                                     [else
+                                                      (lamC (get-symboles-proc a) (get-arg-types-proc a) (parse exp))])]
              [other (error 'JYSS "invalid proc syntax: ~v" s)])]
     ['rec: (match s
             [(list 'rec: (list (? symbol? id) '= (list 'proc (list a ...) ': retTy 'go bdy)) 'in use)
-                                                (recC id (get-symboles-proc a) (get-arg-types-proc a) (parse-type retTy) (parse bdy) (parse use))])]
+                                                (recC id (get-symboles-proc a)
+                                                      (get-arg-types-proc a)
+                                                      (parse-type retTy) (parse bdy) (parse use))])]
     ))
 
 ;Combines parsing and interpretation be able to evaluate JYSS3
@@ -325,7 +381,11 @@
 ;test-case
 (check-equal? (top-interp '{{proc {[a : num] [b : num] [c : num]} go {+ a {+ b c}}} 3 4 5}) "12")
 (check-equal? (top-interp '{{proc {} go {if (<= 3 5) 11 5000}} }) "11")
-
+(check-equal? (top-interp '{{proc {[b : bool]} go {if b 3 4}} true}) "3")
+(check-equal? (top-interp '{{proc {[c : str]} go {if (str-eq? c "horse")
+                                                     (substring c 0 2) "not a horse"}} "horse"}) "\"ho\"")
+(check-equal? (top-interp '{num-eq? 3 4}) "false")
+(check-equal? (top-interp '{str-eq? "car" "horse"}) "false")
 (check-equal? (top-interp
                '{rec: [square-helper =
                                      {proc {[n : num]} : num go
@@ -334,29 +394,46 @@
                       {vars: [square : {num -> num}  =
                                     {proc {[n : num]} go {square-helper {- {* 2 n} 1}}}]
                             body: {square 13}}})
-              "196")
+              "169")
 
-(check-exn (regexp (regexp-quote "empty or not in environments table"))
+(check-exn (regexp (regexp-quote "body return type not correct"))
+           (lambda ()  (top-interp '(rec: [f = {proc {} : bool go
+                                            5}] in {f}))))
+
+(check-exn (regexp (regexp-quote "user-error"))
+           (lambda ()  (top-interp '(error "hose"))))
+
+
+
+(check-exn (regexp (regexp-quote "type arity mismatch"))
            (lambda ()   (top-interp '(error "1234" "23244"))))
-(check-exn (regexp (regexp-quote "empty or not in environments table"))
-           (lambda ()   (top-interp '(+ 4 (error "1234")))))
+
+
+(check-exn (regexp (regexp-quote "arg type mismatch"))
+           (lambda ()   (top-interp '(+ 4 (error "132132")))))
 (check-exn (regexp (regexp-quote "must use valid syntax"))
            (lambda ()  (top-interp '{{proc {a b c} go {+ a {+ b c}}} 3 4})))
+(check-exn (regexp (regexp-quote "invalid proc syntax"))
+           (lambda ()   (top-interp '{proc})))
 (check-exn (regexp (regexp-quote "not a function type"))
            (lambda ()  (top-interp '{23 4 4})))
 
 ;test-case
 (check-equal? (parse "Hello") (strC "Hello"))
+
+(check-equal? (parse (quote (proc ((a : ((num -> str) (str -> num) -> (bool -> bool)))) go 8))) "true")
 (check-equal? (parse '{a})  (AppC (idC 'a) (list)))
 (check-equal? (parse '{if 4 5 5}) (ifC (numC 4) (numC 5) (numC 5)))
 (check-equal? (parse '{f x}) (AppC (idC 'f) (list (idC 'x))))
 (check-equal? (parse '{f x y}) (AppC (idC 'f) (list (idC 'x) (idC 'y))))
 (check-equal? (parse '{^ 3 4}) (AppC (idC '^) (list (numC 3) (numC 4))))
-(check-equal? (parse '{proc {[a : num] [b : num]} go a}) (lamC (list 'a 'b) (list (numT) (numT)) (idC 'a)))
-(check-equal? (parse '{rec: [x = {proc {[n : num]} : num go (x 3)}] in 4}) (recC 'x (list 'n) (list (numT)) (numT) (AppC (idC 'x) (list (numC 3))) (numC 4)))
-;(check-equal? (parse '{vars: [z = 3] [x = 3] body: {+ x z}})
-;              (AppC (lamC (list 'z 'x) (AppC (idC '+) (list (idC 'x) (idC 'z))) (numT))
-;                        (list (numC 3) (numC 3))))
+(check-equal? (parse '{proc {[a : num] [b : num]} go a})
+              (lamC (list 'a 'b) (list (numT) (numT)) (idC 'a)))
+(check-equal? (parse '{rec: [x = {proc {[n : num]} : num go (x 3)}] in 4})
+              (recC 'x (list 'n) (list (numT)) (numT) (AppC (idC 'x) (list (numC 3))) (numC 4)))
+(check-equal? (parse '{vars: [z : num = 3] [x : num = 3] body: {+ x z}})
+              (AppC (lamC (list 'z 'x) (list (numT) (numT)) (AppC (idC '+) (list (idC 'x) (idC 'z))))
+                        (list (numC 3) (numC 3))))
 
 (check-exn (regexp (regexp-quote "this is not a valid ID"))
            (lambda () (parse '(+ if 4))))
@@ -374,10 +451,14 @@
            (lambda () (parse '{vars: [if = 3] body: {+ if 3}})))
 
 ;test-case
-(check-equal? (get-paramVals '([s : num = 3] [e : num = 5] [r : num = 3])) (list (numC 3) (numC 5) (numC 3)))
+(check-equal? (get-paramVals '([s : num = 3] [e : num = 5] [r : num = 3]))
+              (list (numC 3) (numC 5) (numC 3)))
 
 ;test-case
 (check-equal? (get-symboles '([s : num = x] [e : num = t] [r : num = i])) (list 's 'e 'r))
+
+(check-exn (regexp (regexp-quote "cannot use reserved word"))
+           (lambda () (get-symboles-proc '([if : bool] [if : num]))))
 
 ;test-case
 (check-equal? (expected-type '(if x y g)) 'if)
@@ -387,7 +468,8 @@
 (check-equal? (expected-type '(+ e 5 f)) 'AppC)
 
 ;test-case
-(check-equal? (create-Bindings (list 'f 'r 'h) (list 3 5 6)) (list (Bind 'f 3) (Bind 'r 5) (Bind 'h 6)))
+(check-equal? (create-Bindings (list 'f 'r 'h) (list 3 5 6))
+              (list (Bind 'f (box 3)) (Bind 'r (box 5)) (Bind 'h (box 6))))
 
 ;test-case
 (check-equal? (serialize 3) "3")
@@ -406,13 +488,11 @@
 (check-equal? (interp (AppC (idC '-) (list (numC 3) (numC 4))) top-level) -1)
 (check-equal? (interp (AppC (idC '/) (list (numC 4) (numC 4))) top-level) 1)
 (check-equal? (interp (AppC (idC '*) (list (numC 3) (numC 4))) top-level) 12)
-;(check-equal? (interp (AppC (idC 'equal?) (list (numC 4) (numC 4))) top-level) #t)
-;(check-equal? (interp (AppC (idC 'equal?) (list (idC 'true) (idC 'false))) top-level) #f)
-;(check-equal? (interp (AppC (idC 'equal?) (list (strC "howdy") (strC "hi"))) top-level) #f)
-;(check-equal? (interp (AppC (idC 'equal?) (list (numC 4) (idC 'true))) top-level) #f)
 
-(check-exn (regexp (regexp-quote "wrong number of args for a binary operation"))
+(check-exn (regexp (regexp-quote "not a substring"))
            (lambda () (interp (AppC (idC '+) (list (numC 3) (numC 3) (numC 4))) top-level)))
+(check-exn (regexp (regexp-quote "wrong number of args"))
+           (lambda () (interp (AppC (idC '+) (list (numC 3) (numC 3) (numC 4) (numC 5))) top-level)))
 (check-exn (regexp (regexp-quote "the cond must return a boolean"))
            (lambda () (interp (ifC (numC 4) (numC 4) (numC 5)) top-level)))
 (check-exn (regexp (regexp-quote "args must both be real"))
@@ -428,22 +508,38 @@
 (check-exn (regexp (regexp-quote "division by 0"))
            (lambda () (interp (AppC (idC '/) (list (numC 3) (numC 0))) top-level)))
 (check-equal? (interp (AppC (idC 'f) (list (numC 3)))
-                      (list (Bind 'f (cloV (list 'x) (AppC (idC '+) (list (idC 'x) (numC 1))) top-level)))) 4)
-;(check-equal?
-; (interp (lamC (list 'a 'b) (AppC (idC '+) (list (idC 'a) (idC 'b))) (numT)) top-level)
-; (cloV (list 'a 'b) (AppC (idC '+) (list (idC 'a) (idC 'b))) top-level))
-;(check-equal? (interp (AppC (lamC (list 'a 'b) (AppC (idC '+) (list (idC 'a) (idC 'b))) (numT))
-;                                (list (numC 4) (numC 4))) top-level) 8)
+                      (list (Bind 'f (box (cloV (list 'x) (AppC (idC '+) (list (idC 'x) (numC 1))) top-level))))) 4)
+(check-equal?
+ (interp (lamC (list 'a 'b) (list (numT) (numT)) (AppC (idC '+) (list (idC 'a) (idC 'b)))) top-level)
+ (cloV (list 'a 'b) (AppC (idC '+) (list (idC 'a) (idC 'b))) top-level))
+(check-equal? (interp (AppC (lamC (list 'a 'b) (list (numT) (numT)) (AppC (idC '+) (list (idC 'a) (idC 'b))))
+                                (list (numC 4) (numC 4))) top-level) 8)
+
 ;test-case
 (check-equal? (interpret-funcalls (idC 'f)
-                                  (list (Bind 'f (cloV (list 'a)
-                                                       (AppC (idC '+) (list (idC 'a) (numC 1))) top-level)))
+                                  (list (Bind 'f (box (cloV (list 'a)
+                                                       (AppC (idC '+) (list (idC 'a) (numC 1))) top-level))))
                                   (list (numC 3))) 4)
 ;test-case
-(check-equal? (lookup 'a (list (Bind 'f 5) (Bind 'a 4))) 4)
+(check-equal? (lookup 'a (list (Bind 'f (box 5)) (Bind 'a (box 4)))) 4)
 (check-exn (regexp (regexp-quote "empty or not in environments table"))
-           (lambda () (lookup 'd (list (Bind 'f 5) (Bind 'a 4)))))
+           (lambda () (lookup 'd (list (Bind 'f (box 5)) (Bind 'a (box 4))))))
 
 
 ;test-case
 (check-equal? (get-arg-types '([a : num = expr] [b : num = expr] [c : num = expr])) (list (numT) (numT) (numT)))
+
+
+(check-equal? (get-box 'car (list (Bind 'no (box "dummy")) (Bind 'car (box "loser")))) (box "loser"))
+
+(check-exn (regexp (regexp-quote "empty or not in environments table"))
+           (lambda () (get-box 'car '())))
+
+(check-exn (regexp (regexp-quote "cannot use reserved word"))
+           (lambda () (get-symboles '([if : bool = {}] [d : bool = {}]))))
+
+(check-exn (regexp (regexp-quote "empty or not in type environments table"))
+           (lambda () (lookup-type 'f '())))
+
+(check-exn (regexp (regexp-quote "unknown type"))
+           (lambda () (parse-type 'aa)))
