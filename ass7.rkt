@@ -130,7 +130,8 @@
     [(primopV s) "#<primop>"]
     ))
 
-;function that maps primitive operations to a symbol (no type checking is necessary here change later)
+;function that maps primitive operations to a symbol
+;(need to cast becuse of the Racket required types for operations)
 (define (primitiveOperator [s : Sexp] [l : Value] [r : Value]) : Value
   (match s
     ['+ (if (not (and (real? l) (real? r)))
@@ -213,9 +214,6 @@
                                [else (get-box id r)])])]
     ))
 
-;helper function to create listof of TyExprC from args
-(define (my-params [s : (Listof Any)]) : (Listof TyExprC)
-  (cast s (Listof TyExprC)))
 
 ;the evaluator/interpreter which uses listof function definitions to evaluate expressions
 (define (interp [exp : TyExprC] [env : Env]) : Value
@@ -227,7 +225,7 @@
     [(ifC a b c) (cond
                   [(boolean? (interp a env)) (if (interp a env) (interp b env) (interp c env))] 
                   [else (error 'JYSS "the cond must return a boolean: ~v" a)])]
-    [(AppC f (list args ...)) (interpret-funcalls f env (my-params args))]
+    [(AppC f args) (interpret-funcalls f env args)]
     [(recC recName args argsTy retTy bdy use)
      (interpret-rec-funcalls recName args bdy use (cons (Bind recName (box "dummy")) env))]))
 

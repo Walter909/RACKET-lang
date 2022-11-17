@@ -1,8 +1,7 @@
  #lang typed/racket
 (require typed/rackunit)
 
-;JYSS7
-;I implemented everything and all my testcases pass
+;JYSS8
 ;expression definitons : parse output
 (define-type TyExprC (U numC ifC idC strC AppC lamC recC))
 (struct numC ([n : Real])#:transparent)
@@ -130,7 +129,8 @@
     [(primopV s) "#<primop>"]
     ))
 
-;function that maps primitive operations to a symbol (no type checking is necessary here change later)
+;function that maps primitive operations to a symbol
+;(need to cast becuse of the Racket required types for operations)
 (define (primitiveOperator [s : Sexp] [l : Value] [r : Value]) : Value
   (match s
     ['+ (if (not (and (real? l) (real? r)))
