@@ -31,6 +31,9 @@
 (struct MacBind ([name : Symbol] [pattern : Sexp] [template : Sexp])#:transparent)
 (define top-level-mac : MacEnv (list))
 
+;data structure for pattern and use arguments mapping 
+(struct PatternBind ([pattern-symbol : Symbol] [use-expression : Sexp])#:transparent)
+
 ;predicate to check if we are looking at a macro in sexp
 (define (contains-macro? [name : Symbol] [env : MacEnv]) : Boolean
   (match env
@@ -48,7 +51,7 @@
 ;test-case
 (check-equal? (lookup-macro 's (list (MacBind 'or 'a 'b) (MacBind 's 'b 'z))) (MacBind 's 'b 'z))
 
-;template substitutes the what with for in template
+;template substitation for id's and use
 (define (template-subst-id [id : Symbol] [use : (Listof Sexp)] [template : Sexp]) : Sexp
   (match template
     [(list l ...) (map (lambda ([templ : Sexp]) (template-subst-id id use templ)) l)]
@@ -61,9 +64,42 @@
 (check-equal? (template-subst-id 'a '(b) '(a g a)) '((b) g (b)))
 (check-equal? (template-subst-id 'a '(b) '((a a) 3 a)) '(((b) (b)) 3 (b)))
 
-;helper function to check if elements in match and use are of the same type
-(define (elements-match [use : (Listof Sexp)] [pattern : Sexp]) : Boolean
-  #t
+
+
+;helper function to create pattern bindings
+(define (create-pattern-bindings [pattern-args : (Listof Sexp)] [use-args : (Listof Sexp)]) : (Listof PatternBind)
+  (match pattern-args
+    ['() '()]
+    [(cons f r) (match f
+                  [(? symbol? id) (cons (PatternBind id (first use-args)) (create-pattern-bindings r (rest use-args)))]
+                  [(list inner-pattern-list ...) (match (first use-args)
+                                                   [(list inner-use-list ...)
+                                                    (append (create-pattern-bindings inner-pattern-list inner-use-list)
+                                                            (create-pattern-bindings r (rest use-args)))]
+                                                   [other (error 'JYSS "elements don't match ~e ~e" f (first use-args))]
+                                                   )])]))
+
+
+;test-case
+(check-equal? (create-pattern-bindings '{{n  r} b} '{{f  19} {+ f 2}}) (list (PatternBind 'n 'f) (PatternBind 'r 19) (PatternBind 'b '{+ f 2})))
+(check-exn (regexp (regexp-quote "elements don't match"))
+           (lambda ()   (create-pattern-bindings  '{{n  r} b} '{z 14})))
+
+;lookup a pattern bind symbol in my bindings and return if it is in it else return the id
+(define (lookup-pattern-binding [id : Symbol] [bindings : (Listof PatternBind)]) : Sexp
+  (match bindings
+    ['() id]
+    [(cons f r) (if (equal? (PatternBind-pattern-symbol f) id) (PatternBind-use-expression f) (lookup-pattern-binding id r))]))
+
+;template substitution for pattern-args and use-args
+(define (template-subst-list [pattern-args : (Listof Sexp)] [use-args : (Listof Sexp)] [template : Sexp]) : Sexp
+  (define bindings (create-pattern-bindings pattern-args use-args))
+  (match template
+    [(? symbol? s) (lookup-pattern-binding s bindings)]
+    [(list l ...) (match l
+                    ['() '()]
+                    [(cons f r) (cons (template-subst-list pattern-args use-args f) (template-subst-list pattern-args use-args r))])]
+    [other template])
   )
 
 ;the try pattern match to see what kind of pattern we have and does it match our use
@@ -71,7 +107,7 @@
    (match pattern
      [(? symbol? id) (template-subst-id id use template)]
      [(? list? l) (cond
-                    [(and (equal? (length pattern) (length use)) (elements-match use pattern)) '()]
+                    [(equal? (length pattern) (length use)) (template-subst-list (rest pattern) use-args template)]
                     [else (error 'JYSS "We cannot use this pattern ~e" pattern)])]                                    
      [(? real? pattern) (error 'JYSS "illegal pattern")]
      [(? string? pattern) (error 'JYSS "illegal pattern")]
@@ -84,7 +120,7 @@
     [(MacBind name pattern template) (try-pattern-match pattern use-args use template)]))
 
 ;test-case
-(check-equal? (expand-macro 'or (list (MacBind 'or '(or a b) '((proc (t1 t2) (if t1 t1 t2)) a b))) (list 'a 'b) '(or 'f 'h))  '())
+(check-equal? (expand-macro 'or (list (MacBind 'or '(or a b) '((proc (t1 t2) (if t1 t1 t2)) a b))) (list 'x 'y) '(or 'x 'y)) '((proc (t1 t2) (if t1 t1 t2)) x y))
 
 ;helper function that expands body after extending the environment
 (define (top-expand-helper [body : Sexp] [env : MacEnv]) : Sexp
@@ -105,6 +141,7 @@
 ;test-case
 ;(check-equal? (top-expand '{let-stx {or = [{or a b} => {{proc {t1 t2} {if t1 t1 t2}} a b}]} {or false {equal? 13 13}}})
 ;              '{{proc {t1 t2} {if t1 t1 t2}} false {equal? 13 13}})
+(check-equal? (top-expand '{let-stx {not = [not => not]} not}) not) 
 
 ;serialize function that takes any value and returns a string format of it
 (define (serialize [x : Value]) : String
